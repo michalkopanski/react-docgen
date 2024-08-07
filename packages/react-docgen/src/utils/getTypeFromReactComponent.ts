@@ -25,7 +25,25 @@ import getTypeIdentifier from './getTypeIdentifier.js';
 import isReactBuiltinReference from './isReactBuiltinReference.js';
 import unwrapBuiltinTSPropTypes from './unwrapBuiltinTSPropTypes.js';
 
-// TODO TESTME
+// Helper function to resolve Pick and Omit
+function resolvePickOrOmit(path, typeParams) {
+  const typeChecker = path.getTypeChecker();
+  const [baseType, keys] = path.node.typeArguments;
+
+  const resolvedBaseType = typeChecker.getTypeAtLocation(baseType);
+  const keysToPickOrOmit = keys.isUnion() ? keys.types : [keys];
+
+  const properties = resolvedBaseType.getProperties();
+
+  return properties.filter((prop) => {
+    const key = prop.getName();
+    const shouldInclude = keysToPickOrOmit.some(
+      (keyPath) => keyPath.getText() === key,
+    );
+
+    return path.node.typeName.name === `Pick` ? shouldInclude : !shouldInclude;
+  });
+}
 
 function getStatelessPropsPath(
   componentDefinition: NodePath,
@@ -33,12 +51,14 @@ function getStatelessPropsPath(
   let value = componentDefinition;
 
   if (isReactForwardRefCall(value)) {
-    value = resolveToValue(value.get('arguments')[0]!);
+    value = resolveToValue(value.get(`arguments`)[0]!);
   }
 
-  if (!value.isFunction()) return;
+  if (!value.isFunction()) {
+    return;
+  }
 
-  return value.get('params')[0];
+  return value.get(`params`)[0];
 }
 
 function findAssignedVariableType(
@@ -48,25 +68,29 @@ function findAssignedVariableType(
     path.isVariableDeclarator(),
   ) as NodePath<VariableDeclarator> | null;
 
-  if (!variableDeclarator) return null;
+  if (!variableDeclarator) {
+    return null;
+  }
 
-  const typeAnnotation = getTypeAnnotation(variableDeclarator.get('id'));
+  const typeAnnotation = getTypeAnnotation(variableDeclarator.get(`id`));
 
-  if (!typeAnnotation) return null;
+  if (!typeAnnotation) {
+    return null;
+  }
 
   if (typeAnnotation.isTSTypeReference()) {
-    const typeName = typeAnnotation.get('typeName');
+    const typeName = typeAnnotation.get(`typeName`);
 
     if (
-      isReactBuiltinReference(typeName, 'FunctionComponent') ||
-      isReactBuiltinReference(typeName, 'FC') ||
-      isReactBuiltinReference(typeName, 'VoidFunctionComponent') ||
-      isReactBuiltinReference(typeName, 'VFC')
+      isReactBuiltinReference(typeName, `FunctionComponent`) ||
+      isReactBuiltinReference(typeName, `FC`) ||
+      isReactBuiltinReference(typeName, `VoidFunctionComponent`) ||
+      isReactBuiltinReference(typeName, `VFC`)
     ) {
-      const typeParameters = typeAnnotation.get('typeParameters');
+      const typeParameters = typeAnnotation.get(`typeParameters`);
 
       if (typeParameters.hasNode()) {
-        return typeParameters.get('params')[0] ?? null;
+        return typeParameters.get(`params`)[0] ?? null;
       }
     }
   }
@@ -75,25 +99,25 @@ function findAssignedVariableType(
 }
 
 /**
- * Given an React component (stateless or class) tries to find
+ * Given a React component (stateless or class) tries to find
  * flow or TS types for the props. It may find multiple types.
  * If not found or it is not one of the supported component types,
- *  this function returns an empty array.
+ * this function returns an empty array.
  */
 export default (componentDefinition: NodePath): NodePath[] => {
   const typePaths: NodePath[] = [];
 
   if (isReactComponentClass(componentDefinition)) {
-    const superTypes = componentDefinition.get('superTypeParameters');
+    const superTypes = componentDefinition.get(`superTypeParameters`);
 
     if (superTypes.hasNode()) {
-      const params = superTypes.get('params');
+      const params = superTypes.get(`params`);
 
       if (params.length >= 1) {
         typePaths.push(params[params.length === 3 ? 1 : 0]!);
       }
     } else {
-      const propsMemberPath = getMemberValuePath(componentDefinition, 'props');
+      const propsMemberPath = getMemberValuePath(componentDefinition, `props`);
 
       if (!propsMemberPath) {
         return [];
@@ -134,34 +158,41 @@ export function applyToTypeProperties(
 ): void {
   if (path.isObjectTypeAnnotation()) {
     path
-      .get('properties')
+      .get(`properties`)
       .forEach((propertyPath) => callback(propertyPath, typeParams));
   } else if (path.isTSTypeLiteral()) {
     path
-      .get('members')
+      .get(`members`)
       .forEach((propertyPath) => callback(propertyPath, typeParams));
   } else if (path.isInterfaceDeclaration()) {
     applyExtends(documentation, path, callback, typeParams);
 
     path
-      .get('body')
-      .get('properties')
+      .get(`body`)
+      .get(`properties`)
       .forEach((propertyPath) => callback(propertyPath, typeParams));
   } else if (path.isTSInterfaceDeclaration()) {
     applyExtends(documentation, path, callback, typeParams);
 
     path
-      .get('body')
-      .get('body')
+      .get(`body`)
+      .get(`body`)
       .forEach((propertyPath) => callback(propertyPath, typeParams));
   } else if (
     path.isIntersectionTypeAnnotation() ||
     path.isTSIntersectionType()
   ) {
-    (path.get('types') as Array<NodePath<FlowType | TSType>>).forEach(
+    (path.get(`types`) as Array<NodePath<FlowType | TSType>>).forEach(
       (typesPath) =>
         applyToTypeProperties(documentation, typesPath, callback, typeParams),
     );
+  } else if (
+    path.isTSTypeReference() &&
+    (path.node.typeName.name === `Pick` || path.node.typeName.name === `Omit`)
+  ) {
+    const properties = resolvePickOrOmit(path, typeParams);
+
+    properties.forEach((prop) => callback(prop, typeParams));
   } else if (!path.isUnionTypeAnnotation()) {
     // The react-docgen output format does not currently allow
     // for the expression of union types
@@ -179,7 +210,7 @@ function applyExtends(
   callback: (propertyPath: NodePath, params: TypeParameters | null) => void,
   typeParams: TypeParameters | null,
 ): void {
-  const classExtends = path.get('extends');
+  const classExtends = path.get(`extends`);
 
   if (!Array.isArray(classExtends)) {
     return;
@@ -193,14 +224,14 @@ function applyExtends(
 
       if (resolvedPath) {
         if (
-          resolvedPath.has('typeParameters') &&
+          resolvedPath.has(`typeParameters`) &&
           extendsPath.node.typeParameters
         ) {
           typeParams = getTypeParameters(
-            resolvedPath.get('typeParameters') as NodePath<
+            resolvedPath.get(`typeParameters`) as NodePath<
               TSTypeParameterDeclaration | TypeParameterDeclaration
             >,
-            extendsPath.get('typeParameters') as NodePath<
+            extendsPath.get(`typeParameters`) as NodePath<
               TSTypeParameterInstantiation | TypeParameterInstantiation
             >,
             typeParams,
